@@ -6,12 +6,9 @@
   https://opensource.org/licenses/MIT.
 */
 
-import {cacheNames} from 'workbox-core/_private/cacheNames.js';
-import {getFriendlyURL} from 'workbox-core/_private/getFriendlyURL.js';
-import {logger} from 'workbox-core/_private/logger.js';
-import {getCacheKeyForURL} from './getCacheKeyForURL.js';
 import {urlManipulation} from '../_types.js';
 import '../_version.js';
+import { getOrCreatePrecacheController } from './getOrCreatePrecacheController.js';
 
 
 export interface FetchListenerOptions {
@@ -54,63 +51,11 @@ export const addFetchListener = ({
   cleanURLs = true,
   urlManipulation,
 }: FetchListenerOptions = {}) => {
-  const cacheName = cacheNames.getPrecacheName();
-
-  // See https://github.com/Microsoft/TypeScript/issues/28357#issuecomment-436484705
-  self.addEventListener('fetch', ((event: FetchEvent) => {
-    const precachedURL = getCacheKeyForURL(event.request.url, {
-      cleanURLs,
-      directoryIndex,
-      ignoreURLParametersMatching,
-      urlManipulation,
-    });
-    if (!precachedURL) {
-      if (process.env.NODE_ENV !== 'production') {
-        logger.debug(`Precaching did not find a match for ` +
-          getFriendlyURL(event.request.url));
-      }
-      return;
-    }
-
-    let responsePromise = self.caches.open(cacheName).then((cache) => {
-      return cache.match(precachedURL);
-    }).then((cachedResponse) => {
-      if (cachedResponse) {
-        return cachedResponse;
-      }
-
-      // Fall back to the network if we don't have a cached response
-      // (perhaps due to manual cache cleanup).
-      if (process.env.NODE_ENV !== 'production') {
-        logger.warn(`The precached response for ` +
-        `${getFriendlyURL(precachedURL)} in ${cacheName} was not found. ` +
-        `Falling back to the network instead.`);
-      }
-
-      return fetch(precachedURL);
-    });
-
-    if (process.env.NODE_ENV !== 'production') {
-      responsePromise = responsePromise.then((response) => {
-        // Workbox is going to handle the route.
-        // print the routing details to the console.
-        logger.groupCollapsed(`Precaching is responding to: ` +
-          getFriendlyURL(event.request.url));
-        logger.log(`Serving the precached url: ${precachedURL}`);
-
-        logger.groupCollapsed(`View request details here.`);
-        logger.log(event.request);
-        logger.groupEnd();
-
-        logger.groupCollapsed(`View response details here.`);
-        logger.log(response);
-        logger.groupEnd();
-
-        logger.groupEnd();
-        return response;
-      });
-    }
-
-    event.respondWith(responsePromise);
-  }) as EventListener);
+  const precacheController = getOrCreatePrecacheController();
+  precacheController.addFetchListener({
+    ignoreURLParametersMatching,
+    directoryIndex,
+    cleanURLs,
+    urlManipulation,
+  });
 };

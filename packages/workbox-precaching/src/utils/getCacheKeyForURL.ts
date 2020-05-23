@@ -8,7 +8,6 @@
 
 import {FetchListenerOptions} from './addFetchListener.js';
 import {getOrCreatePrecacheController} from './getOrCreatePrecacheController.js';
-import {generateURLVariations} from './generateURLVariations.js';
 import '../_version.js';
 
 /**
@@ -25,12 +24,5 @@ import '../_version.js';
 export const getCacheKeyForURL =
     (url: string, options: FetchListenerOptions): string | void => {
   const precacheController = getOrCreatePrecacheController();
-
-  const urlsToCacheKeys = precacheController.getURLsToCacheKeys();
-  for (const possibleURL of generateURLVariations(url, options)) {
-    const possibleCacheKey = urlsToCacheKeys.get(possibleURL);
-    if (possibleCacheKey) {
-      return possibleCacheKey;
-    }
-  }
+  return precacheController.getCacheKeyForURL(url, options);
 };

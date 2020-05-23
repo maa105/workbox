@@ -11,6 +11,7 @@ import {cacheNames} from 'workbox-core/_private/cacheNames.js';
 import {cacheWrapper} from 'workbox-core/_private/cacheWrapper.js';
 import {fetchWrapper} from 'workbox-core/_private/fetchWrapper.js';
 import {logger} from 'workbox-core/_private/logger.js';
+import {getFriendlyURL} from 'workbox-core/_private/getFriendlyURL.js';
 import {WorkboxError} from 'workbox-core/_private/WorkboxError.js';
 import {copyResponse} from 'workbox-core/copyResponse.js';
 import {RouteHandlerCallback, RouteHandlerCallbackOptions}
@@ -21,8 +22,10 @@ import {PrecacheEntry} from './_types.js';
 import {createCacheKey} from './utils/createCacheKey.js';
 import {printCleanupDetails} from './utils/printCleanupDetails.js';
 import {printInstallDetails} from './utils/printInstallDetails.js';
+import {FetchListenerOptions} from './utils/addFetchListener.js';
 
 import './_version.js';
+import { generateURLVariations } from './utils/generateURLVariations.js';
 
 /**
  * Performs efficient precaching of assets.
@@ -323,12 +326,22 @@ class PrecacheController {
    * URL with a search parameter appended to it.
    *
    * @param {string} url A URL whose cache key you want to look up.
+   * @param {Object} options
    * @return {string} The versioned URL that corresponds to a cache key
    * for the original URL, or undefined if that URL isn't precached.
    */
-  getCacheKeyForURL(url: string) {
-    const urlObject = new URL(url, location.href);
-    return this._urlsToCacheKeys.get(urlObject.href);
+  getCacheKeyForURL(url: string, options: FetchListenerOptions | undefined = undefined): string | void {
+    if(options == undefined) {
+      const urlObject = new URL(url, location.href);
+      return this._urlsToCacheKeys.get(urlObject.href);
+    }
+    const urlsToCacheKeys = this.getURLsToCacheKeys();
+    for (const possibleURL of generateURLVariations(url, options)) {
+      const possibleCacheKey = urlsToCacheKeys.get(possibleURL);
+      if (possibleCacheKey) {
+        return possibleCacheKey;
+      }
+    }
   }
 
   /**
@@ -423,6 +436,138 @@ class PrecacheController {
     const request = new Request(url);
     return () => handler({request});
   }
+
+  /**
+   * Gets a `fetch` listener that will
+   * respond to
+   * [network requests]{@link https://developer.mozilla.org/en-US/docs/Web/API/Service_Worker_API/Using_Service_Workers#Custom_responses_to_requests}
+   * with precached assets.
+   *
+   * Requests for assets that aren't precached, the `FetchEvent` will not be
+   * responded to, allowing the event to fall through to other `fetch` event
+   * listeners.
+   *
+   * @private
+   * @param {Object} [options]
+   * @param {string} [options.directoryIndex=index.html] The `directoryIndex` will
+   * check cache entries for a URLs ending with '/' to see if there is a hit when
+   * appending the `directoryIndex` value.
+   * @param {Array<RegExp>} [options.ignoreURLParametersMatching=[/^utm_/]] An
+   * array of regex's to remove search params when looking for a cache match.
+   * @param {boolean} [options.cleanURLs=true] The `cleanURLs` option will
+   * check the cache for the URL with a `.html` added to the end of the end.
+   * @param {workbox.precaching~urlManipulation} [options.urlManipulation]
+   * This is a function that should take a URL and return an array of
+   * alternative URLs that should be checked for precache matches.
+   * @returns {EventListener} an event fandler for to be used for the fetch event 
+   */
+  getFetchListener = ({
+    ignoreURLParametersMatching = [/^utm_/],
+    directoryIndex = 'index.html',
+    cleanURLs = true,
+    urlManipulation,
+  }: FetchListenerOptions = {}): EventListener => {
+    const cacheName = this._cacheName;
+
+    return ((event: FetchEvent) => {
+      const precachedURL = this.getCacheKeyForURL(event.request.url, {
+        cleanURLs,
+        directoryIndex,
+        ignoreURLParametersMatching,
+        urlManipulation,
+      });
+      if (!precachedURL) {
+        if (process.env.NODE_ENV !== 'production') {
+          logger.debug(`Precaching did not find a match for ` +
+            getFriendlyURL(event.request.url));
+        }
+        return;
+      }
+
+      let responsePromise = self.caches.open(cacheName).then((cache) => {
+        return cache.match(precachedURL);
+      }).then((cachedResponse) => {
+        if (cachedResponse) {
+          return cachedResponse;
+        }
+
+        // Fall back to the network if we don't have a cached response
+        // (perhaps due to manual cache cleanup).
+        if (process.env.NODE_ENV !== 'production') {
+          logger.warn(`The precached response for ` +
+          `${getFriendlyURL(precachedURL)} in ${cacheName} was not found. ` +
+          `Falling back to the network instead.`);
+        }
+
+        return fetch(precachedURL);
+      });
+
+      if (process.env.NODE_ENV !== 'production') {
+        responsePromise = responsePromise.then((response) => {
+          // Workbox is going to handle the route.
+          // print the routing details to the console.
+          logger.groupCollapsed(`Precaching is responding to: ` +
+            getFriendlyURL(event.request.url));
+          logger.log(`Serving the precached url: ${precachedURL}`);
+
+          logger.groupCollapsed(`View request details here.`);
+          logger.log(event.request);
+          logger.groupEnd();
+
+          logger.groupCollapsed(`View response details here.`);
+          logger.log(response);
+          logger.groupEnd();
+
+          logger.groupEnd();
+          return response;
+        });
+      }
+
+      event.respondWith(responsePromise);
+    }) as EventListener;
+  };
+
+  /**
+   * Adds a `fetch` listener to the service worker that will
+   * respond to
+   * [network requests]{@link https://developer.mozilla.org/en-US/docs/Web/API/Service_Worker_API/Using_Service_Workers#Custom_responses_to_requests}
+   * with precached assets.
+   *
+   * Requests for assets that aren't precached, the `FetchEvent` will not be
+   * responded to, allowing the event to fall through to other `fetch` event
+   * listeners.
+   *
+   * NOTE: when called more than once this method will replace the previously set
+   * configuration options. Calling it more than once is not recommended outside
+   * of tests.
+   *
+   * @private
+   * @param {Object} [options]
+   * @param {string} [options.directoryIndex=index.html] The `directoryIndex` will
+   * check cache entries for a URLs ending with '/' to see if there is a hit when
+   * appending the `directoryIndex` value.
+   * @param {Array<RegExp>} [options.ignoreURLParametersMatching=[/^utm_/]] An
+   * array of regex's to remove search params when looking for a cache match.
+   * @param {boolean} [options.cleanURLs=true] The `cleanURLs` option will
+   * check the cache for the URL with a `.html` added to the end of the end.
+   * @param {workbox.precaching~urlManipulation} [options.urlManipulation]
+   * This is a function that should take a URL and return an array of
+   * alternative URLs that should be checked for precache matches.
+   */
+  addFetchListener = ({
+    ignoreURLParametersMatching = [/^utm_/],
+    directoryIndex = 'index.html',
+    cleanURLs = true,
+    urlManipulation,
+  }: FetchListenerOptions = {}) => {
+    // See https://github.com/Microsoft/TypeScript/issues/28357#issuecomment-436484705
+    self.addEventListener('fetch', this.getFetchListener({
+      ignoreURLParametersMatching,
+      directoryIndex,
+      cleanURLs,
+      urlManipulation,
+    }));
+  };
 }
 
 export {PrecacheController};
